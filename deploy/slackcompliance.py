@@ -7,7 +7,6 @@ from urllib.error import URLError, HTTPError
 
 ENCRYPTED_HOOK_URL = os.environ['kmsEncryptedHookUrl']
 SLACK_CHANNEL = os.environ['slackChannel']
-#HOOK_URL = "https://hooks.slack.com/services/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"
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
