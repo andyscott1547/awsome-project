@@ -1,0 +1,23 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - echo Install started on `date`
+      - echo Entered the install phase ...
+      - pip install pytest pytest-mock moto
+      - pip install -r events/requirements.txt
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Entered the unittest phase ...
+      - export AWS_XRAY_SDK_ENABLED=false
+      - pytest ./tests/unit/test_handler.py -v --junitxml="reports/pytest_report.xml"
+      - echo Tests Passed ...
+
+reports:
+  pytest_reports:
+    files:
+      - pytest_report.xml
+    base-directory: ./reports
+    file-format: JUNITXML

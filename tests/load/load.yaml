@@ -1,0 +1,45 @@
+config:
+  plugins:
+    expect: {}
+  ensure:
+    maxErrorRate: 1
+  target: https://b4t6prk2kc.execute-api.eu-west-2.amazonaws.com/Dev
+  phases:
+    - duration: 300
+      arrivalRate: 1
+      rampTo: 2
+  defaults:
+    headers:
+      x-api-key: "{{ $processEnvironment.SERVICE_API_KEY }}"
+scenarios:
+  - flow:
+      - get:
+          url: "/"
+          expect:
+            - statusCode: 200
+      - get:
+          url: "/scan"
+          expect:
+            - statusCode: 200
+      - post:
+          url: "/delete"
+          json:
+            Email: andyscott1547@hotmail.com
+          expect:
+            - statusCode: 200
+      - post:
+          url: "/create"
+          json:
+            First_Name: Harry
+            Surname: Potter
+            Email: test@hogwarts.uk
+            Contact_Number: 00712345694
+            House_Number: hogwarts
+            Street_Name: school
+            Town: Hogsmede
+            County: magical kingdom
+            Postcode: wz1 9hp
+            Request: Test
+            Message: Test
+          expect:
+            - statusCode: 200

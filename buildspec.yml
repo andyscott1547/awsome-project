@@ -1,0 +1,22 @@
+version: 0.2
+phases:
+  install:
+    commands:
+      - echo Install started on `date`
+      - echo Entered the install phase ...
+      - pip install -r events/requirements.txt
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Entered the build phase ...
+      - sam validate
+      - sam build
+      - sam package --s3-bucket awsome-sam-app-ew2 --output-template-file packaged.yaml
+      #- sam deploy --template-file packaged.yaml --stack-name python-hello-world-sam-application --capabilities CAPABILITY_IAM
+      - echo Build Complete ...
+
+artifacts:
+  files:
+    - packaged.yaml
+    - config-dev.json
+    - config-prod.json

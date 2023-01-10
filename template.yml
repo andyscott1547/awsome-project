@@ -1,0 +1,408 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: AWSome Builder CI/CD project.
+
+Parameters:
+  Env:
+    Type: String 
+    Default: Dev 
+    AllowedValues:
+      - SandBox
+      - Dev 
+      - QA 
+      - Prod
+
+Globals:
+  Function:
+    Timeout: 3
+    Layers:
+      - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:12"
+
+Resources:
+  ApiGatewayApi:
+    DependsOn: HealthGet
+    Type: AWS::Serverless::Api
+    Properties:
+      AccessLogSetting:
+        Format: '{"apiId":"$context.apiId","stage":"$context.stage","resourcePath":"$context.resourcePath","requestId":"$context.requestId","awsEndpointRequestId":"$context.awsEndpointRequestId","xrayTraceId":"$context.xrayTraceId","requestTime":"$context.requestTime","requestTimeEpoch":$context.requestTimeEpoch,"httpMethod":"$context.httpMethod","status":"$context.status","path":"$context.path"}'
+        DestinationArn: !GetAtt AccessLogGroup.Arn
+      StageName: !Ref Env
+      Cors:
+        AllowMethods: "'OPTIONS,PUT,GET,POST'"
+        AllowHeaders: "'*'"
+        AllowOrigin: "'*'"
+        AllowCredentials: "'*'"
+      TracingEnabled: true
+      MethodSettings:
+        - LoggingLevel: INFO
+          HttpMethod: '*'
+          ResourcePath: '/*'
+          MetricsEnabled: true
+
+  HealthGet:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: health.health_handler
+      Runtime: python3.8
+      CodeUri: ./events
+      Description: A starter AWS Lambda function.
+      Tracing: Active
+      MemorySize: 128
+      Timeout: 3
+      Policies:
+          - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TableName: !Sub ${Env}-Record-Table
+          Env: !Sub ${Env}
+          LAMBDA_INSIGHTS_LOG_LEVEL: info
+      Events:
+        HealthGetApi:
+          Type: Api
+          Properties:
+            Path: /
+            Method: GET
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              ApiKeyRequired: true
+      AutoPublishAlias: !Ref Env
+      DeploymentPreference:
+        Type: Canary10Percent5Minutes
+        Alarms:
+          # A list of alarms that you want to monitor
+          - !Ref AliasErrorMetricGreaterThanZeroAlarm
+          - !Ref LatestVersionErrorMetricGreaterThanZeroAlarm
+
+  DynamoDBPost:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: create.create_handler
+      Runtime: python3.8
+      CodeUri: ./events
+      Description: A starter AWS Lambda function.
+      Tracing: Active
+      MemorySize: 128
+      Timeout: 3
+      Policies:
+          - CloudWatchPutMetricPolicy: {}
+          - DynamoDBCrudPolicy:
+              TableName: !Ref table
+      Environment:
+        Variables:
+          TableName: !Sub ${Env}-Record-Table
+          Env: !Sub ${Env}
+          LAMBDA_INSIGHTS_LOG_LEVEL: info
+      Events:
+        DynamoDBPostApi:
+          Type: Api
+          Properties:
+            Path: /create
+            Method: POST
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              ApiKeyRequired: true
+      AutoPublishAlias: !Ref Env
+      DeploymentPreference:
+        Type: Canary10Percent5Minutes
+        Alarms:
+          # A list of alarms that you want to monitor
+          - !Ref CreateErrorMetricGreaterThanZeroAlarm
+          - !Ref CreateVersionErrorMetricGreaterThanZeroAlarm
+
+  DynamoDBOption:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: preflight.preflight_handler
+      Runtime: python3.8
+      CodeUri: ./events
+      Description: A starter AWS Lambda function.
+      Tracing: Active
+      MemorySize: 128
+      Timeout: 3
+      Policies:
+          - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          Env: !Sub ${Env}
+          LAMBDA_INSIGHTS_LOG_LEVEL: info
+      Events:
+        DynamoDBPostApi:
+          Type: Api
+          Properties:
+            Path: /create
+            Method: OPTIONS
+            RestApiId: !Ref ApiGatewayApi
+
+  DynamoDBScan:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: scan.scan_handler
+      Runtime: python3.8
+      CodeUri: ./events
+      Description: A starter AWS Lambda function.
+      Tracing: Active
+      MemorySize: 128
+      Timeout: 3
+      Policies:
+          - CloudWatchPutMetricPolicy: {}
+          - DynamoDBCrudPolicy:
+              TableName: !Ref table
+      Environment:
+        Variables:
+          TableName: !Sub ${Env}-Record-Table
+          Env: !Sub ${Env}
+          LAMBDA_INSIGHTS_LOG_LEVEL: info
+      Events:
+        DynamoDBPostApi:
+          Type: Api
+          Properties:
+            Path: /scan
+            Method: GET
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              ApiKeyRequired: true
+      AutoPublishAlias: !Ref Env
+      DeploymentPreference:
+        Type: Canary10Percent5Minutes
+        Alarms:
+          # A list of alarms that you want to monitor
+          - !Ref ScanErrorMetricGreaterThanZeroAlarm
+          - !Ref ScanVersionErrorMetricGreaterThanZeroAlarm
+
+  DynamoDBDelete:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: delete.delete_handler
+      Runtime: python3.8
+      CodeUri: ./events
+      Description: A starter AWS Lambda function.
+      Tracing: Active
+      MemorySize: 128
+      Timeout: 3
+      Policies:
+          - CloudWatchPutMetricPolicy: {}
+          - DynamoDBCrudPolicy:
+              TableName: !Ref table
+      Environment:
+        Variables:
+          TableName: !Sub ${Env}-Record-Table
+          Env: !Sub ${Env}
+          LAMBDA_INSIGHTS_LOG_LEVEL: info
+      Events:
+        DynamoDBPostApi:
+          Type: Api
+          Properties:
+            Path: /delete
+            Method: POST
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              ApiKeyRequired: true
+      AutoPublishAlias: !Ref Env
+      DeploymentPreference:
+        Type: Canary10Percent5Minutes
+        Alarms:
+          # A list of alarms that you want to monitor
+          - !Ref DeleteErrorMetricGreaterThanZeroAlarm
+          - !Ref DeleteVersionErrorMetricGreaterThanZeroAlarm
+
+  table:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      TableName: !Sub ${Env}-Record-Table
+      PrimaryKey:
+        Name: Email
+        Type: String
+
+  ApiKey:
+    Type: 'AWS::ApiGateway::ApiKey'
+    DependsOn:
+      - HealthGet
+      - ApiGatewayApiStage
+    Properties:
+      #Name: !Sub ${Env}-TestApiKey
+      Description: CloudFormation API Key V1
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref ApiGatewayApi
+          StageName: !Ref Env
+  ApiUsagePlan:
+    DependsOn: 
+      - ApiKey
+      - ApiGatewayApiStage
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      ApiStages:
+        - ApiId: !Ref ApiGatewayApi
+          Stage: !Ref Env
+      Description: !Sub ${Env}-Usage-Plan
+      Quota:
+        Limit: 150000
+        Period: DAY
+      Throttle:
+        BurstLimit: 2500
+        RateLimit: 1250
+      UsagePlanName: !Sub ${Env}-Usage-Plan
+  usagePlanKey:
+    Type: 'AWS::ApiGateway::UsagePlanKey'
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref ApiUsagePlan
+
+  AliasErrorMetricGreaterThanZeroAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: Lambda Function Error > 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${HealthGet}:${Env}"
+        - Name: FunctionName
+          Value: !Ref HealthGet
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: ignore
+
+  LatestVersionErrorMetricGreaterThanZeroAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: Lambda Function Error > 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${HealthGet}:${Env}"
+        - Name: FunctionName
+          Value: !Ref HealthGet
+        - Name: ExecutedVersion
+          Value: !GetAtt HealthGet.Version.Version
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: ignore
+
+  CreateErrorMetricGreaterThanZeroAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: Lambda Function Error > 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${DynamoDBPost}:${Env}"
+        - Name: FunctionName
+          Value: !Ref DynamoDBPost
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: ignore
+
+  CreateVersionErrorMetricGreaterThanZeroAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: Lambda Function Error > 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${DynamoDBPost}:${Env}"
+        - Name: FunctionName
+          Value: !Ref DynamoDBPost
+        - Name: ExecutedVersion
+          Value: !GetAtt DynamoDBPost.Version.Version
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: ignore
+
+  ScanErrorMetricGreaterThanZeroAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: Lambda Function Error > 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${DynamoDBScan}:${Env}"
+        - Name: FunctionName
+          Value: !Ref DynamoDBScan
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: ignore
+
+  ScanVersionErrorMetricGreaterThanZeroAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: Lambda Function Error > 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${DynamoDBScan}:${Env}"
+        - Name: FunctionName
+          Value: !Ref DynamoDBScan
+        - Name: ExecutedVersion
+          Value: !GetAtt DynamoDBScan.Version.Version
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: ignore
+
+  DeleteErrorMetricGreaterThanZeroAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: Lambda Function Error > 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${DynamoDBDelete}:${Env}"
+        - Name: FunctionName
+          Value: !Ref DynamoDBDelete
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: ignore
+
+  DeleteVersionErrorMetricGreaterThanZeroAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: Lambda Function Error > 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${DynamoDBDelete}:${Env}"
+        - Name: FunctionName
+          Value: !Ref DynamoDBDelete
+        - Name: ExecutedVersion
+          Value: !GetAtt DynamoDBDelete.Version.Version
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: ignore
+
+  AccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /${Env}/${ApiGatewayApi}/api-gateway
+      RetentionInDays: 7

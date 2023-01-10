@@ -1,0 +1,17 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      nodejs: 10
+    commands:
+    - echo Install started on `date`
+    - echo Entered the Install phase ...
+    - npm install -g artillery artillery-plugin-expect --allow-root --unsafe-perm=true
+  build:
+    commands:
+      - echo Load Test started on `date`
+      - echo Entered the loadtest phase ...
+      - artillery dino
+      - export SERVICE_API_KEY=$(aws ssm get-parameter --name "/Dev/API_Key" --with-decryption --output text --query Parameter.Value)
+      - artillery run ./tests/load/load.yaml
+      - echo Test Passed ...

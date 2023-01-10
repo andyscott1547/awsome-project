@@ -1,0 +1,692 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: A CI/CD pipeline for building and deploying SAM applications.
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Description: The name of the GitHub repository.
+    Default: AWSome-Project
+  Branch:
+    Type: String
+    Description: The name of the branch.
+    Default: master
+
+Resources:
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name:
+        Fn::Sub: ${RepositoryName}-pipeline
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Checkout
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                BranchName: !Ref Branch
+                RepositoryName: !Ref RepositoryName
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              RunOrder: 1
+              Configuration:
+                ProjectName:
+                  Ref: CodeBuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+            - Name: UnitTest
+              ActionTypeId:
+                Category: Test
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              RunOrder: 1
+              Configuration:
+                ProjectName:
+                  Ref: CodeBuildUnitTestProject
+              InputArtifacts:
+                - Name: SourceOutput
+            - Name: Validate
+              ActionTypeId:
+                Category: Test
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              RunOrder: 1
+              Configuration:
+                ProjectName:
+                  Ref: CodeBuildValidateProject
+              InputArtifacts:
+                - Name: SourceOutput
+        - Name: DeployToDev
+          Actions:
+            - Name: Prepare
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                Capabilities: CAPABILITY_IAM
+                TemplatePath: BuildOutput::packaged.yaml
+                TemplateConfiguration: BuildOutput::config-dev.json
+#                ParameterOverrides:
+#                  Fn::Sub: '{ "StageName": "dev", "S3BucketName": "${ArtifactsBucket}" }'
+                ChangeSetName:
+                  Fn::Sub: ${RepositoryName}-changeset
+                StackName:
+                  Fn::Sub: ${RepositoryName}-dev
+                RoleArn:
+                  Fn::GetAtt: CloudFormationServiceRole.Arn
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+            - Name: Execute
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName:
+                  Fn::Sub: ${RepositoryName}-changeset
+                StackName:
+                  Fn::Sub: ${RepositoryName}-dev
+              RunOrder: 2
+        - Name: Test
+          Actions:
+            - Name: FunctionalLoadTest
+              ActionTypeId:
+                Category: Test
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              RunOrder: 1
+              Configuration:
+                ProjectName:
+                  Ref: CodeBuildLoadTestProject
+              InputArtifacts:
+                - Name: SourceOutput
+            - Name: UITest
+              ActionTypeId:
+                Category: Test
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              RunOrder: 1
+              Configuration:
+                ProjectName:
+                  Ref: CodeBuildUITestProject
+              InputArtifacts:
+                - Name: SourceOutput
+        - Name: ApproveForProd
+          Actions:
+            - Name: Approval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: 1
+              Configuration:
+                NotificationArn:
+                  Ref: Topic
+        - Name: DeployToProd
+          Actions:
+            - Name: Prepare
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                Capabilities: CAPABILITY_IAM
+                TemplatePath: BuildOutput::packaged.yaml
+                TemplateConfiguration: BuildOutput::config-prod.json
+#                ParameterOverrides:
+#                  Fn::Sub: '{ "StageName": "prod", "S3BucketName": "${ArtifactsBucket}" }'
+                ChangeSetName:
+                  Fn::Sub: ${RepositoryName}-changeset
+                StackName:
+                  Fn::Sub: ${RepositoryName}-prod
+                RoleArn:
+                  Fn::GetAtt: CloudFormationServiceRole.Arn
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+            - Name: Execute
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName:
+                  Fn::Sub: ${RepositoryName}-changeset
+                StackName:
+                  Fn::Sub: ${RepositoryName}-prod
+              RunOrder: 2
+      RoleArn:
+        Fn::GetAtt:  CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location:
+          Ref: ArtifactsBucket
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name:
+        Fn::Sub: ${RepositoryName}-build
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      ServiceRole:
+        Fn::GetAtt: CodeBuildServiceRole.Arn
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Value:
+              Ref: ArtifactsBucket
+      Cache:
+        Type: S3
+        Location:
+          Fn::Sub: ${ArtifactsBucket}/cache
+
+  CodeBuildLoadTestProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name:
+        Fn::Sub: ${RepositoryName}-loadtest
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: tests/load/loadtest.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      ServiceRole:
+        Fn::GetAtt: CodeBuildTestServiceRole.Arn
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Value:
+              Ref: ArtifactsBucket
+
+  CodeBuildUnitTestProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name:
+        Fn::Sub: ${RepositoryName}-unittest
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: tests/unit/unittest.yaml
+      Artifacts:
+        Type: CODEPIPELINE
+      ServiceRole:
+        Fn::GetAtt: CodeBuildTestServiceRole.Arn
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Value:
+              Ref: ArtifactsBucket
+
+  CodeBuildValidateProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name:
+        Fn::Sub: ${RepositoryName}-validate
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: tests/validate/lint.yaml
+      Artifacts:
+        Type: CODEPIPELINE
+      ServiceRole:
+        Fn::GetAtt: CodeBuildTestServiceRole.Arn
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Value:
+              Ref: ArtifactsBucket
+
+  CodeBuildUITestProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name:
+        Fn::Sub: ${RepositoryName}-uitest
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: tests/ui/uitest.yaml
+      Artifacts:
+        Type: CODEPIPELINE
+      ServiceRole:
+        Fn::GetAtt: CodeBuildTestServiceRole.Arn
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Value:
+              Ref: ArtifactsBucket
+          - Name: UI_TEST_BUCKET
+            Value:
+              Ref: UITestBucket
+
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: awsome.${AWS::Region}
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteBuildArtifactsAfterOneWeek
+            ExpirationInDays: 7
+            Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  UITestBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: awsome-uitest-${AWS::Region}
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteUITestArtifactsAfterOneWeek
+            ExpirationInDays: 7
+            Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelineTrustPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codecommit:*
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource:
+                  - Fn::GetAtt: CodeBuildProject.Arn
+                  - Fn::GetAtt: CodeBuildLoadTestProject.Arn
+                  - Fn::GetAtt: CodeBuildUnitTestProject.Arn
+                  - Fn::GetAtt: CodeBuildValidateProject.Arn
+                  - Fn::GetAtt: CodeBuildUITestProject.Arn
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:ValidateTemplate
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - Fn::GetAtt: CloudFormationServiceRole.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - Ref: Topic
+              - Effect: Allow
+                Action:
+                  - iam:*
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - kms:*
+                Resource: "*"
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildTrustPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${RepositoryName}-build
+                  - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${RepositoryName}-build:*
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - codebuild:CreateReportGroup
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:BatchPutTestCases
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cloudformation:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - lambda:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - apigateway:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kms:*
+                Resource: "*"
+
+  CodeBuildTestServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildTrustPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${RepositoryName}-unittest
+                  - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${RepositoryName}-unittest:*
+                  - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${RepositoryName}-loadtest
+                  - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${RepositoryName}-loadtest:*
+                  - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${RepositoryName}-validate
+                  - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${RepositoryName}-validate:*
+                  - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${RepositoryName}-uitest
+                  - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${RepositoryName}-uitest:*
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - codebuild:CreateReportGroup
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:BatchPutTestCases
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ssm:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kms:*
+                Resource: "*"
+  #
+  # Service role according to https://docs.aws.amazon.com/lambda/latest/dg/build-pipeline.html
+  #
+  CloudFormationServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaExecute
+      Policies:
+        - PolicyName: CloudFormationTrustPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - apigateway:*
+                  - codedeploy:*
+                  - lambda:*
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - Fn::Sub: arn:aws:s3:::${ArtifactsBucket}/*
+              - Effect: Allow
+                Action:
+                  - lambda:*
+                Resource:
+                  - Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*
+              - Effect: Allow
+                Action:
+                  - lambda:GetEventSourceMapping
+                  - lambda:CreateEventSourceMapping
+                  - lambda:DeleteEventSourceMapping
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - apigateway:*
+                Resource:
+                  - Fn::Sub: arn:aws:apigateway:${AWS::Region}::*
+              - Effect: Allow
+                Action:
+                  - sns:*
+                  - cloudwatch:*
+                  - sqs:*
+                  - iam:*
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:PutRolePolicy
+                Resource:
+                  - Fn::Sub: arn:aws:iam::${AWS::AccountId}:role/*
+              - Effect: Allow
+                Action:
+                  - iam:AttachRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                Resource:
+                  - Fn::Sub: arn:aws:iam::${AWS::AccountId}:role/*
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                Resource:
+                  - Fn::Sub: arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
+                  - Fn::Sub: arn:aws:cloudformation:${AWS::Region}:aws:transform/Include
+              - Effect: Allow
+                Action:
+                  - codedeploy:CreateApplication
+                  - codedeploy:DeleteApplication
+                  - codedeploy:RegisterApplicationRevision
+                Resource:
+                  - Fn::Sub: arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:application:*
+              - Effect: Allow
+                Action:
+                  - codedeploy:CreateDeploymentGroup
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetDeployment
+                Resource:
+                  - Fn::Sub: arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:*
+              - Effect: Allow
+                Action:
+                  - codedeploy:GetDeploymentConfig
+                Resource:
+                  - Fn::Sub: arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentconfig:*
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource:
+                  - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/*
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - kms:*
+                Resource: "*"
+  Topic:
+    Type: 'AWS::SNS::Topic'
+    Properties: {}
+  TopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      PolicyDocument:
+        Id: Id1
+        Version: '2012-10-17'
+        Statement:
+        - Sid: Sid1
+          Effect: Allow
+          Principal:
+            Service:
+            - 'events.amazonaws.com' # Allow CloudWatch Events
+            - 'budgets.amazonaws.com' # Allow Budget Notifications
+            - 'rds.amazonaws.com' # Allow RDS Events
+            - 's3.amazonaws.com' # Allow S3 Event Notifications
+            - 'backup.amazonaws.com' # Allow Backup Events
+            - 'codestar-notifications.amazonaws.com' # Allow CodeStart Notifications
+          Action: 'sns:Publish'
+          Resource: !Ref Topic
+      Topics:
+      - !Ref Topic
+  MySubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: aandsco@amazon.co.uk
+      Protocol: email
+      TopicArn: !Ref Topic
+  
+  

@@ -1,0 +1,18 @@
+version: 0.2
+phases:
+  install:
+    commands:
+      - echo Install started on `date`
+      - echo Entered the install phase ...
+      - pip install cfn-lint pylint
+      - gem install cfn-nag
+      - pip install -r events/requirements.txt
+  build:
+    commands:
+      - echo Validate started on `date`
+      - echo Entered the validate phase ...
+      - cfn_nag_rules
+      - cfn-lint template.yml
+      - cfn_nag template.yml
+      - pylint ./events
+      - echo Tests Passed ...

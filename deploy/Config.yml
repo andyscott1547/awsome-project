@@ -1,0 +1,360 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Enable AWS Config
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Recorder Configuration
+        Parameters:
+          - AllSupported
+          - IncludeGlobalResourceTypes
+          - ResourceTypes
+      - Label:
+          default: Delivery Channel Configuration
+        Parameters:
+          - DeliveryChannelName
+          - Frequency
+      - Label:
+          default: Delivery Notifications
+        Parameters:
+          - TopicArn
+          - NotificationEmail
+    ParameterLabels:
+      AllSupported:
+        default: Support all resource types
+      IncludeGlobalResourceTypes:
+        default: Include global resource types
+      ResourceTypes:
+        default: List of resource types if not all supported
+      DeliveryChannelName:
+        default: Configuration delivery channel name
+      Frequency:
+        default: Snapshot delivery frequency
+      TopicArn:
+        default: SNS topic name
+      NotificationEmail:
+        default: Notification Email (optional)
+
+Parameters:
+
+  AllSupported:
+    Type: String
+    Default: True
+    Description: Indicates whether to record all supported resource types.
+    AllowedValues:
+      - True
+      - False
+
+  IncludeGlobalResourceTypes:
+    Type: String
+    Default: True
+    Description: Indicates whether AWS Config records all supported global resource types.
+    AllowedValues:
+      - True
+      - False
+
+  ResourceTypes:
+    Type: List<String>
+    Description: A list of valid AWS resource types to include in this recording group, such as AWS::EC2::Instance or AWS::CloudTrail::Trail.
+    Default: <All>
+
+  DeliveryChannelName:
+    Type: String
+    Default: <Generated>
+    Description: The name of the delivery channel.
+
+  Frequency:
+    Type: String
+    Default: 24hours
+    Description: The frequency with which AWS Config delivers configuration snapshots.
+    AllowedValues:
+      - 1hour
+      - 3hours
+      - 6hours
+      - 12hours
+      - 24hours
+
+  TopicArn:
+    Type: String
+    Default: <New Topic>
+    Description: The Amazon Resource Name (ARN) of the Amazon Simple Notification Service (Amazon SNS) topic that AWS Config delivers notifications to.
+
+  NotificationEmail:
+    Type: String
+    Default: <None>
+    Description: Email address for AWS Config notifications (for new topics).
+
+Conditions:
+  IsAllSupported: !Equals
+    - !Ref AllSupported
+    - True
+  IsGeneratedDeliveryChannelName: !Equals
+    - !Ref DeliveryChannelName
+    - <Generated>
+  CreateTopic: !Equals
+    - !Ref TopicArn
+    - <New Topic>
+  CreateSubscription: !And
+    - !Condition CreateTopic
+    - !Not
+      - !Equals
+        - !Ref NotificationEmail
+        - <None>
+
+Mappings:
+  Settings:
+    FrequencyMap:
+      1hour   : One_Hour
+      3hours  : Three_Hours
+      6hours  : Six_Hours
+      12hours : Twelve_Hours
+      24hours : TwentyFour_Hours
+
+Resources:
+
+  ConfigBucket:
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  ConfigBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ConfigBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AWSConfigBucketPermissionsCheck
+            Effect: Allow
+            Principal:
+              Service:
+                - config.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${ConfigBucket}"
+          - Sid: AWSConfigBucketDelivery
+            Effect: Allow
+            Principal:
+              Service:
+                - config.amazonaws.com
+            Action: s3:PutObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${ConfigBucket}/AWSLogs/${AWS::AccountId}/*"
+
+  ConfigTopic:
+    Condition: CreateTopic
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "config-topic-${AWS::AccountId}"
+      DisplayName: AWS Config Notification Topic
+
+  ConfigTopicPolicy:
+    Condition: CreateTopic
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref ConfigTopic
+      PolicyDocument:
+        Statement:
+          - Sid: AWSConfigSNSPolicy
+            Action:
+              - sns:Publish
+            Effect: Allow
+            Resource: !Ref ConfigTopic
+            Principal:
+              Service:
+                - config.amazonaws.com
+
+  EmailNotification:
+    Condition: CreateSubscription
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref NotificationEmail
+      Protocol: email
+      TopicArn: !Ref ConfigTopic
+
+  ConfigRecorderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - config.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWS_ConfigRole"
+
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    DependsOn:
+      - ConfigBucketPolicy
+    Properties:
+      RoleARN: !GetAtt ConfigRecorderRole.Arn
+      RecordingGroup:
+        AllSupported: !Ref AllSupported
+        IncludeGlobalResourceTypes: !Ref IncludeGlobalResourceTypes
+        ResourceTypes: !If
+          - IsAllSupported
+          - !Ref AWS::NoValue
+          - !Ref ResourceTypes
+
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    DependsOn:
+      - ConfigBucketPolicy
+    Properties:
+      Name: !If
+        - IsGeneratedDeliveryChannelName
+        - !Ref AWS::NoValue
+        - !Ref DeliveryChannelName
+      ConfigSnapshotDeliveryProperties:
+        DeliveryFrequency: !FindInMap
+          - Settings
+          - FrequencyMap
+          - !Ref Frequency
+      S3BucketName: !Ref ConfigBucket
+      SnsTopicARN: !If
+        - CreateTopic
+        - !Ref ConfigTopic
+        - !Ref TopicArn
+
+  S3BucketPublicReadProhibited:
+    Type: AWS::Config::ConfigRule
+    DependsOn:
+      - ConfigRecorder
+    Properties:
+      ConfigRuleName: S3BucketPublicReadProhibited
+      Description: >- 
+        Checks that your Amazon S3 buckets do not allow public read access.
+        The rule checks the Block Public Access settings, the bucket policy, and the
+        bucket access control list (ACL).
+      Scope:
+        ComplianceResourceTypes:
+        - "AWS::S3::Bucket"
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_PUBLIC_READ_PROHIBITED
+      MaximumExecutionFrequency: !FindInMap
+        - Settings
+        - FrequencyMap
+        - !Ref Frequency
+
+  AccessKeysRotated:
+    Type: 'AWS::Config::ConfigRule'
+    DependsOn:
+      - ConfigRecorder
+    Properties:
+      ConfigRuleName: AccessKeysRotated
+      Description: >-
+        Checks whether the active access keys are rotated within the number of
+        days specified in maxAccessKeyAge. The rule is non-compliant if the
+        access keys have not been rotated for more than maxAccessKeyAge number
+        of days.
+      InputParameters:
+        maxAccessKeyAge: 90
+      Scope: {}
+      Source:
+        Owner: AWS
+        SourceIdentifier: ACCESS_KEYS_ROTATED
+      MaximumExecutionFrequency: !FindInMap
+        - Settings
+        - FrequencyMap
+        - !Ref Frequency
+
+  APIGatewayXRayEnabled:
+    Type: 'AWS::Config::ConfigRule'
+    DependsOn:
+      - ConfigRecorder
+    Properties:
+      ConfigRuleName: APIGatewayXRayEnabled
+      Description: >-
+        Checks if AWS X-Ray tracing is enabled on Amazon API Gateway REST APIs.
+        The rule is COMPLIANT if X-Ray tracing is enabled and NON_COMPLIANT
+        otherwise.
+      InputParameters: {}
+      Scope:
+        ComplianceResourceTypes:
+          - 'AWS::ApiGateway::Stage'
+      Source:
+        Owner: AWS
+        SourceIdentifier: API_GW_XRAY_ENABLED
+
+  CodeBuildProjectEnvVarAWSCredCheck:
+    Type: 'AWS::Config::ConfigRule'
+    DependsOn:
+      - ConfigRecorder
+    Properties:
+      ConfigRuleName: CodeBuildProjectEnvVarAWSCredCheck
+      Description: >-
+        Checks whether the project contains environment variables
+        AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. The rule is NON_COMPLIANT
+        when the project environment variables contains plaintext credentials.
+      InputParameters: {}
+      Scope:
+        ComplianceResourceTypes:
+          - 'AWS::CodeBuild::Project'
+      Source:
+        Owner: AWS
+        SourceIdentifier: CODEBUILD_PROJECT_ENVVAR_AWSCRED_CHECK
+
+  S3BucketSSEEncryptionEnabled:
+    Type: 'AWS::Config::ConfigRule'
+    DependsOn:
+      - ConfigRecorder
+    Properties:
+      ConfigRuleName: S3BucketSSEEncryptionEnabled
+      Description: >-
+        Checks that your Amazon S3 bucket either has S3 default encryption
+        enabled or that the S3 bucket policy explicitly denies put-object
+        requests without server side encryption.
+      InputParameters: {}
+      Scope:
+        ComplianceResourceTypes:
+          - 'AWS::S3::Bucket'
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED
+
+  CodeBuildProjectSourceRepoURLCheck:
+    Type: 'AWS::Config::ConfigRule'
+    DependsOn:
+      - ConfigRecorder
+    Properties:
+      ConfigRuleName: CodeBuildProjectSourceRepoURLCheck
+      Description: >-
+        Checks whether the GitHub or Bitbucket source repository URL contains
+        either personal access tokens or user name and password. The rule is
+        complaint with the usage of OAuth to grant authorization for accessing
+        GitHub or Bitbucket repositories.
+      InputParameters: {}
+      Scope:
+        ComplianceResourceTypes:
+          - 'AWS::CodeBuild::Project'
+      Source:
+        Owner: AWS
+        SourceIdentifier: CODEBUILD_PROJECT_SOURCE_REPO_URL_CHECK
+
+  DynamoDBTableEncryptedEnabled:
+    Type: 'AWS::Config::ConfigRule'
+    Properties:
+      ConfigRuleName: DynamoDBTableEncryptedEnabled
+      Description: >-
+        Checks whether the Amazon DynamoDB tables are encrypted and checks their
+        status. The rule is compliant if the status is enabled or enabling.
+      InputParameters: {}
+      Scope:
+        ComplianceResourceTypes:
+          - 'AWS::DynamoDB::Table'
+      Source:
+        Owner: AWS
+        SourceIdentifier: DYNAMODB_TABLE_ENCRYPTION_ENABLED
